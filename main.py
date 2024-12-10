@@ -1,9 +1,8 @@
 from pykinect2024 import PyKinect2024, PyKinectRuntime
 import cv2
 import numpy as np
-from sklearn.svm import SVC
 import mediapipe as mp
-import time
+import os
 import csv
 
 kinect = PyKinectRuntime.PyKinectRuntime(PyKinect2024.FrameSourceTypes_Color | PyKinect2024.FrameSourceTypes_Depth)
@@ -50,17 +49,17 @@ def get_lmk_distance(landmarks, depth_frame):
 
     return np.array(features)
 
-def get_right_x(result):
+def get_right_y(result):
     for facial_landmarks in result.multi_face_landmarks:
         r_side = facial_landmarks.landmark[234] #point near right cheek
-        x = int(r_side.x * 1280)
-        return x
+        y = int(r_side.y * 720)
+        return y
 
-def get_left_x(result):
+def get_left_y(result):
     for facial_landmarks in result.multi_face_landmarks:
         l_side = facial_landmarks.landmark[454] #point near left cheek
-        x = int(l_side.x * 1280)
-        return x
+        y = int(l_side.y * 720)
+        return y
 
 def get_depth_nose(result, depth_frame):
     for facial_landmarks in result.multi_face_landmarks:
@@ -70,23 +69,19 @@ def get_depth_nose(result, depth_frame):
         depth = get_depth_at_point(depth_frame, x, y)
         return depth
     
-def get_x_nose(result):
-    for facial_landmarks in result.multi_face_landmarks:
-        nose = facial_landmarks.landmark[1] # Tip of Nose / Landmark 1
-        x = int(nose.x * 1280)
-        print("Nose" + str(x))
-        return x
+# Function to get the current row count from the CSV file
+def get_row_count(filename='face_data.csv'):
+    if not os.path.isfile(filename):
+        return 0
+    with open(filename, 'r') as file:
+        reader = csv.reader(file)
+        row_count = sum(1 for row in reader)
+    return row_count
 
-def get_y_chin(result):
-    for facial_landmarks in result.multi_face_landmarks:
-        chin = facial_landmarks.landmark[152] # Tip of Nose / Landmark 1
-        y = int(chin.y * 720)
-        print("Chin" + str(y))
-        return y
+row_count = get_row_count()
 
-def save_features_to_csv(features, label, filename='face_data.csv'):
-    # Combine features with the label
-    data = list(features) + [label]
+def save_features_to_csv(features, filename='face_data.csv'):
+    data = list(features) + [row_count]
 
     # Open CSV file in append mode
     with open(filename, mode='a', newline='') as file:
@@ -117,6 +112,9 @@ def draw_guide(frame, result, message):
     cv2.putText(color_frame, message, (516,480), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
     
     cv2.imshow('Kinect 3D Face Landmarks', frame)
+
+def average_features(features_list):
+    return np.mean(features_list, axis=0)
 
 ## https://towardsdatascience.com/head-pose-estimation-using-python-d165d3541600
 def facial_pose(image, results):
@@ -164,12 +162,10 @@ def facial_pose(image, results):
     
     return x, y
 
-svm = SVC(kernel='linear')
-
 capture_limit = 5
 captures = 0
-start_time = time.time()
 phase = 0
+all_features = []
 
 while True:
     if kinect.has_new_color_frame() and kinect.has_new_depth_frame():
@@ -190,36 +186,43 @@ while True:
             
         result = face_mesh.process(color_frame)
 
-        elapsed_time = time.time() - start_time
-
         if phase == 0:
-            if (x >= 0 and x < 1 and y >= 0 and y < 1):
-                message = "Great, youre facing forward"
-                if (get_depth_nose(result, depth_frame) == 500):
-                        message = "Success, face forward stage"
-                        phase += 1
-                        captures = 0
-                elif(get_depth_nose(result, depth_frame) < 500):
-                    message = "Go further away"
-                else:
-                    message = "Come forward"
-            elif (x < 0.5 or x > 2):
-                if (x < 0.5):
-                    message = "Tilt Head Up"
-                else:
-                    message = "Tilt Head Down"
-            elif (y > 1 or y < 0):
-                if (y < 0):
-                    message = "Turn Head Right"
-                else:
-                    message = "Turn Head Left"
+            if (get_left_y(result) - get_right_y(result) <= 7 and get_left_y(result) - get_right_y(result) >= -7):
+                if (x >= 0 and x < 0.7 and y >= 0 and y < 0.7):
+                    message = "Great, youre facing forward"
+                    if (get_depth_nose(result, depth_frame) == 500):
+                            message = "Success, face forward stage"
+                            phase += 1
+                            captures = 0
+                    elif(get_depth_nose(result, depth_frame) < 500):
+                        message = "Go further away"
+                    else:
+                        message = "Come forward"
+                elif (x < 0.5 or x > 2):
+                    if (x < 0.5):
+                        message = "Tilt Head Up"
+                    else:
+                        message = "Tilt Head Down"
+                elif (y > 1 or y < 0):
+                    if (y < 0):
+                        message = "Turn Head Right"
+                    else:
+                        message = "Turn Head Left"
+            else:
+                message = "Straighten head L:" + str(get_left_y(result)) + "R: " + str(get_right_y(result))
 
             color_frame = draw_guide(color_frame, result, message)
         else:
             if captures <= capture_limit:
-                print("Hold")
-                save_face(result)
+                message = "Hold"
+                for facial_landmarks in result.multi_face_landmarks:
+                    features = get_lmk_distance(facial_landmarks.landmark, depth_frame)
+                    all_features.append(features)
                 captures += 1
+            if captures == capture_limit:
+                # Calculate the average of the captures
+                averaged_features = average_features(all_features)
+                save_features_to_csv(averaged_features)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
