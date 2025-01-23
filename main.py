@@ -3,7 +3,8 @@ import cv2
 import numpy as np
 import mediapipe as mp
 import os
-import csv
+import json
+from sklearn import svm
 
 kinect = PyKinectRuntime.PyKinectRuntime(PyKinect2024.FrameSourceTypes_Color | PyKinect2024.FrameSourceTypes_Depth)
 
@@ -68,31 +69,35 @@ def get_depth_nose(result, depth_frame):
         y = int(nose.y * 720)
         depth = get_depth_at_point(depth_frame, x, y)
         return depth
+
+def get_next_user_id(filename='face_data.json'):
+    if os.path.isfile(filename):
+        with open(filename, 'r') as file:
+            data = json.load(file)
+        user_ids = [int(user_id.replace('user', '')) for user_id in data.keys()]
+        if user_ids:
+            return f"user{max(user_ids) + 1}"
+    return "user1"
+
+def save_features_to_json(features, filename='face_data.json'):
+    user_id = get_next_user_id(filename)
     
-# Function to get the current row count from the CSV file
-def get_row_count(filename='face_data.csv'):
-    if not os.path.isfile(filename):
-        return 0
-    with open(filename, 'r') as file:
-        reader = csv.reader(file)
-        row_count = sum(1 for row in reader)
-    return row_count
-
-row_count = get_row_count()
-
-def save_features_to_csv(features, filename='face_data.csv'):
-    data = list(features) + [row_count]
-
-    # Open CSV file in append mode
-    with open(filename, mode='a', newline='') as file:
-        writer = csv.writer(file)
-        # Write the data
-        writer.writerow(data)
-
-def save_face(result):
-    for facial_landmarks in result.multi_face_landmarks:
-        features = get_lmk_distance(facial_landmarks.landmark, depth_frame)
-        save_features_to_csv(features, "placeholder")
+    # Convert features to the required format
+    landmarks = [{"point": i+1, "distance": dist} for i, dist in enumerate(features)]
+    
+    # Load existing data
+    if os.path.isfile(filename):
+        with open(filename, 'r') as file:
+            data = json.load(file)
+    else:
+        data = {}
+    
+    # Update the data with new features
+    data[user_id] = {"landmarks": landmarks}
+    
+    # Save the updated data back to the file
+    with open(filename, 'w') as file:
+        json.dump(data, file, indent=4)
 
 def draw_face(result):
     for facial_landmarks in result.multi_face_landmarks:
@@ -162,70 +167,109 @@ def facial_pose(image, results):
     
     return x, y
 
+def load_faces():
+    ## Reads json to create support vectors
+    with open('face_data.json', 'r') as f:
+        data = json.load(f)
+
+    features = []
+    labels = []
+    for user, landmarks in data.items():
+        distances = [landmark['distance'] for landmark in landmarks['landmarks']]
+        features.append(distances)
+        labels.append(user)
+
+    X = np.array(features)
+    Y = np.array(labels)
+
+    return X, Y
+
+def predict_face(averaged_features):
+    ## Using averaged features recorded, trains face
+    X, Y = load_faces()
+
+    clf = svm.SVC(kernel='linear')
+    clf.fit(X, Y)
+
+    return clf.predict([averaged_features])
+
+
 capture_limit = 5
 captures = 0
 phase = 0
 all_features = []
 
-while True:
-    if kinect.has_new_color_frame() and kinect.has_new_depth_frame():
-        color_frame = kinect.get_last_color_frame()
-        color_frame = color_frame.reshape((1080, 1920, 4)).astype(np.uint8)
-        color_frame = cv2.cvtColor(color_frame, cv2.COLOR_BGRA2RGB)
+choice = int(input("1: Record new face \n2: Predict/recognise face\n"))
 
-        result = face_mesh.process(color_frame)
+if (choice == 1 or choice == 2):
+    while True:
+        if kinect.has_new_color_frame() and kinect.has_new_depth_frame():
+            color_frame = kinect.get_last_color_frame()
+            color_frame = color_frame.reshape((1080, 1920, 4)).astype(np.uint8)
+            color_frame = cv2.cvtColor(color_frame, cv2.COLOR_BGRA2RGB)
 
-        color_frame = cv2.cvtColor(color_frame, cv2.COLOR_RGB2BGR)
+            result = face_mesh.process(color_frame)
 
-        x, y = facial_pose(color_frame, result)
+            color_frame = cv2.cvtColor(color_frame, cv2.COLOR_RGB2BGR)
 
-        color_frame = cv2.resize(color_frame, (1280, 720))
+            x, y = facial_pose(color_frame, result)
 
-        depth_frame = kinect.get_last_depth_frame()
-        depth_frame = depth_frame.reshape((424, 512)).astype(np.uint16)
-            
-        result = face_mesh.process(color_frame)
+            color_frame = cv2.resize(color_frame, (1280, 720))
 
-        if phase == 0:
-            if (get_left_y(result) - get_right_y(result) <= 7 and get_left_y(result) - get_right_y(result) >= -7):
-                if (x >= 0 and x < 0.7 and y >= 0 and y < 0.7):
-                    message = "Great, youre facing forward"
-                    if (get_depth_nose(result, depth_frame) == 500):
-                            message = "Success, face forward stage"
-                            phase += 1
-                            captures = 0
-                    elif(get_depth_nose(result, depth_frame) < 500):
-                        message = "Go further away"
-                    else:
-                        message = "Come forward"
-                elif (x < 0.5 or x > 2):
-                    if (x < 0.5):
-                        message = "Tilt Head Up"
-                    else:
-                        message = "Tilt Head Down"
-                elif (y > 1 or y < 0):
-                    if (y < 0):
-                        message = "Turn Head Right"
-                    else:
-                        message = "Turn Head Left"
+            depth_frame = kinect.get_last_depth_frame()
+            depth_frame = depth_frame.reshape((424, 512)).astype(np.uint16)
+                
+            result = face_mesh.process(color_frame)
+
+            if phase == 0:
+                if (get_left_y(result) - get_right_y(result) <= 7 and get_left_y(result) - get_right_y(result) >= -7):
+                    if (x >= 0 and x < 0.7 and y >= 0 and y < 0.7):
+                        message = "Great, youre facing forward"
+                        if (get_depth_nose(result, depth_frame) == 500):
+                                message = "Success, face forward stage"
+                                phase += 1
+                                captures = 0
+                        elif(get_depth_nose(result, depth_frame) < 500):
+                            message = "Go further away"
+                        else:
+                            message = "Come forward"
+                    elif (x < 0.5 or x > 2):
+                        if (x < 0.5):
+                            message = "Tilt Head Up"
+                        else:
+                            message = "Tilt Head Down"
+                    elif (y > 1 or y < 0):
+                        if (y < 0):
+                            message = "Turn Head Right"
+                        else:
+                            message = "Turn Head Left"
+                else:
+                    message = "Straighten head L:" + str(get_left_y(result)) + "R: " + str(get_right_y(result))
+
+                color_frame = draw_guide(color_frame, result, message)
             else:
-                message = "Straighten head L:" + str(get_left_y(result)) + "R: " + str(get_right_y(result))
+                if captures <= capture_limit:
+                    message = "Hold"
+                    for facial_landmarks in result.multi_face_landmarks:
+                        features = get_lmk_distance(facial_landmarks.landmark, depth_frame)
+                        all_features.append(features)
+                    captures += 1
+                if captures == capture_limit:
+                    averaged_features = average_features(all_features)
+                    if choice == 1:
+                        save_features_to_json(averaged_features)
+                        break
+                    elif choice == 2:
+                        prediction = predict_face(averaged_features)
+                        print(f"Predicted user: {prediction[0]}")
+                        break
 
-            color_frame = draw_guide(color_frame, result, message)
-        else:
-            if captures <= capture_limit:
-                message = "Hold"
-                for facial_landmarks in result.multi_face_landmarks:
-                    features = get_lmk_distance(facial_landmarks.landmark, depth_frame)
-                    all_features.append(features)
-                captures += 1
-            if captures == capture_limit:
-                # Calculate the average of the captures
-                averaged_features = average_features(all_features)
-                save_features_to_csv(averaged_features)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+else:
+    print("Wrong input, try again")
+
 
 kinect.close()
 cv2.destroyAllWindows()
