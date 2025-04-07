@@ -4,7 +4,7 @@ import numpy as np
 import mediapipe as mp
 import os
 import json
-from sklearn import svm
+from sklearn.neighbors import KNeighborsClassifier
 
 kinect = PyKinectRuntime.PyKinectRuntime(PyKinect2024.FrameSourceTypes_Color | PyKinect2024.FrameSourceTypes_Depth)
 
@@ -13,11 +13,11 @@ face_mesh = mp_face_mesh.FaceMesh()
 
 # Indices for key landmarks around eyes, mouth, and nose
 key_landmarks_indices = [
-    1,  # Tip of Nose Reference Point
-    226, # Corner of Right Eye
-    57, # Right Mouth Corner
-    50, # Cheek
-    164 # Philtrum
+    4,  # Tip of Nose Reference Point
+    33, 132,  # Right Eye
+    362, 263,  # Left Eye
+    9, # Forehead
+    61, 291, 0, 17, 37, 267  # Area between mouth and nose
 ]
 
 # Gets depth data at point x & y of the captured frame
@@ -28,22 +28,23 @@ def get_depth_at_point(depth_frame, x, y, color_width=1280, color_height=720, de
 
 # 3D Euclidean Distance Formula
 def calculate_3d_distance(pt1, pt2):
-    return np.sqrt((pt1[0] - pt2[0])**2 + (pt1[1] - pt2[1])**2)
+    return np.sqrt((pt1[0] - pt2[0])**2 + (pt1[1] - pt2[1])**2 + (pt2[1] - pt2[2])**2)
 
 def get_lmk_distance(landmarks, depth_frame):
     features = []
     num_landmarks = len(key_landmarks_indices)
 
-    # Store key landmarks coordinates
     coordinates = []
 
-    # Find x and y and z/depth of landmarks on captured frame
+    # Find x and y coordinates and depth of landmarks on captured frame
     for idx in key_landmarks_indices:
         lm = landmarks[idx]
         x = int(lm.x * 1280)
         y = int(lm.y * 720)
-        coordinates.append((x, y))
+        z = get_depth_at_point(depth_frame, x, y)  # Get depth for each landmark
 
+        coordinates.append((x, y, z))
+        
     # Calculate Euclidean Distance from the tip of nose to other landmarks
     for i in range(1, num_landmarks):
         features.append(calculate_3d_distance(coordinates[0], coordinates[i]))
@@ -64,11 +65,10 @@ def get_left_y(result):
 
 def get_depth_nose(result, depth_frame):
     for facial_landmarks in result.multi_face_landmarks:
-        nose = facial_landmarks.landmark[1] # Tip of Nose / Landmark 1
+        nose = facial_landmarks.landmark[4] # Tip of Nose / Landmark 1
         x = int(nose.x * 1280)
         y = int(nose.y * 720)
-        depth = get_depth_at_point(depth_frame, x, y)
-        return depth
+        return get_depth_at_point(depth_frame, x, y)
 
 def get_next_user_id(filename='face_data.json'):
     if os.path.isfile(filename):
@@ -110,11 +110,11 @@ def draw_face(result):
 def draw_guide(frame, result, message):
     height, width = frame.shape[:2]
     
-    frame = cv2.rectangle(frame, (779, 466), (516, 49) , (0, 255, 0), 2)
+    frame = cv2.rectangle(frame, (920, 466), (1183, 49) , (0, 255, 0), 2)
     
     draw_face(result)
 
-    cv2.putText(color_frame, message, (516,480), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+    cv2.putText(color_frame, message, (920,480), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
     
     cv2.imshow('Kinect 3D Face Landmarks', frame)
 
@@ -152,7 +152,6 @@ def facial_pose(image, results):
                 # The Distance Matrix
                 dist_matrix = np.zeros((4, 1), dtype=np.float64)
 
-                # Solve PnP
                 success, rot_vec, trans_vec = cv2.solvePnP(face_3d, face_2d, cam_matrix, dist_matrix)
 
                 # Get rotational matrix
@@ -168,7 +167,6 @@ def facial_pose(image, results):
     return x, y
 
 def load_faces():
-    ## Reads json to create support vectors
     with open('face_data.json', 'r') as f:
         data = json.load(f)
 
@@ -179,20 +177,24 @@ def load_faces():
         features.append(distances)
         labels.append(user)
 
-    X = np.array(features)
+    # Ensure all feature vectors have the same length
+    max_length = max(len(feat) for feat in features)
+    padded_features = [feat + [0] * (max_length - len(feat)) for feat in features]
+
+    X = np.array(padded_features)
     Y = np.array(labels)
 
     return X, Y
 
 def predict_face(averaged_features):
-    ## Using averaged features recorded, trains face
+    # Using averaged features recorded, trains face
     X, Y = load_faces()
 
-    clf = svm.SVC(kernel='linear')
-    clf.fit(X, Y)
+    # Define the KNN classifier with a specific number of neighbors (e.g., 3)
+    knn = KNeighborsClassifier(n_neighbors=1)
+    knn.fit(X, Y)
 
-    return clf.predict([averaged_features])
-
+    return knn.predict([averaged_features])
 
 capture_limit = 5
 captures = 0
@@ -222,14 +224,14 @@ if (choice == 1 or choice == 2):
             result = face_mesh.process(color_frame)
 
             if phase == 0:
-                if (get_left_y(result) - get_right_y(result) <= 7 and get_left_y(result) - get_right_y(result) >= -7):
+                if (get_left_y(result) - get_right_y(result) <= 11 and get_left_y(result) - get_right_y(result) >= -11):
                     if (x >= 0 and x < 0.7 and y >= 0 and y < 0.7):
                         message = "Great, youre facing forward"
-                        if (get_depth_nose(result, depth_frame) == 500):
+                        if (get_depth_nose(result, depth_frame) > 510 and get_depth_nose(result, depth_frame) < 520):
                                 message = "Success, face forward stage"
                                 phase += 1
                                 captures = 0
-                        elif(get_depth_nose(result, depth_frame) < 500):
+                        elif(get_depth_nose(result, depth_frame) < 510):
                             message = "Go further away"
                         else:
                             message = "Come forward"
